@@ -5,12 +5,25 @@ import pyautogui
 from ultralytics import YOLO
 import re
 import os
+import time
 
 # ==================== CONFIGURATION ====================
 MODEL_PATH = "poker_model.pt"          # Path to save/load trained model
+DATASET_YAML = "dataset.yaml"          # Path to dataset configuration
 SCREEN_REGION = (100, 100, 1000, 700)  # (x,y,width,height) of poker window
 CONFIDENCE_THRESHOLD = 0.5             # Detection confidence threshold
 USE_OCR = True                         # Enable/disable OCR processing
+
+# Training configuration
+TRAINING_CONFIG = {
+    "model": "yolov8n.pt",    # Base model (yolov8n.pt, yolov8s.pt, etc.)
+    "epochs": 100,            # Number of training epochs
+    "imgsz": 640,             # Image size
+    "batch": 8,               # Batch size
+    "patience": 10,           # Early stopping patience
+    "name": "poker_train",    # Training session name
+    "exist_ok": True          # Overwrite existing training
+}
 
 # Poker element classes from your dataset
 CLASSES = {
@@ -36,126 +49,86 @@ CLASSES = {
     19: 'villian_stack'
 }
 
-# ==================== OCR PROCESSOR ====================
-class PokerOCR:
-    def __init__(self):
-        self.reader = easyocr.Reader(['en']) if USE_OCR else None
-        self.card_pattern = re.compile(r'^([AKQJT2-9]|10)[shdc♠♥♦♣]$', re.IGNORECASE)
-        self.numeric_pattern = re.compile(r'[\d,.]+[kKmMbB]?')
-        self.pot_pattern = re.compile(r'pot[:]?\s*([\d,.kKbBmM]+)', re.IGNORECASE)
-        self.name_pattern = re.compile(r'^[a-zA-Z0-9_]+$')
-
-    def process_detection(self, class_name, region):
-        """Process detected region based on its class"""
-        if not USE_OCR or self.reader is None:
-            return None
-
-        try:
-            # Card detection (hole cards and community cards)
-            if class_name.startswith(('card_', 'flop_', 'turn_', 'river_')):
-                return self._extract_card_value(region)
-            
-            # Numeric value detection
-            elif class_name in ('my_bet', 'villian_bet', 'my_stack', 'villian_stack', 'increaser'):
-                return self._extract_numeric_value(region)
-            
-            # Pot value detection
-            elif class_name == 'total_pot':
-                return self._extract_pot_value(region)
-            
-            # Player name detection
-            elif class_name in ('villian_name',):
-                return self._extract_name(region)
-            
-            # Button/text detection
-            elif class_name.startswith('button_'):
-                return self._extract_button_text(region)
-            
-            # Position detection
-            elif class_name.startswith('position_'):
-                return class_name.split('_')[-1]  # Returns 'BB' or 'SB'
-
-        except Exception as e:
-            print(f"OCR Error for {class_name}: {str(e)}")
-        return None
-
-    def _extract_card_value(self, region):
-        """Extract poker card value (Ah, Ks, etc.)"""
-        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        result = self.reader.readtext(binary, allowlist='AKQJT2345678910shdc♠♥♦♣', detail=0)
-        if result:
-            text = ''.join(result).upper()
-            text = text.replace('10', 'T').replace('♠', 's').replace('♥', 'h').replace('♦', 'd').replace('♣', 'c')
-            if self.card_pattern.match(text):
-                return text
-        return None
-
-    def _extract_numeric_value(self, region):
-        """Extract numeric values like bets and stacks"""
-        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(gray)
-        result = self.reader.readtext(enhanced, allowlist='0123456789.,kKmMbB$', detail=0)
-        if result:
-            text = ''.join(result).upper()
-            match = self.numeric_pattern.search(text)
-            return match.group() if match else None
-        return None
-
-    def _extract_pot_value(self, region):
-        """Special handling for pot values"""
-        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        result = self.reader.readtext(gray, allowlist='0123456789.,kKmMbB$pPoOtT', detail=0)
-        if result:
-            text = ''.join(result).upper()
-            match = self.pot_pattern.search(text)
-            return match.group(1) if match else None
-        return None
-
-    def _extract_name(self, region):
-        """Extract player names"""
-        result = self.reader.readtext(region, detail=0)
-        if result and len(result[0]) > 1:  # Filter out very short names
-            text = result[0]
-            if self.name_pattern.match(text):
-                return text
-        return None
-
-    def _extract_button_text(self, region):
-        """Confirm button text matches expected action"""
-        result = self.reader.readtext(region, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ', detail=0)
-        if result:
-            return result[0].upper()
-        return None
-
-# ==================== SCREEN CAPTURE ====================
-class PokerScreenCapture:
-    def __init__(self, region):
-        self.region = region
+# ==================== MODEL TRAINER ====================
+class PokerModelTrainer:
+    @staticmethod
+    def train_model():
+        """Train YOLOv8 poker detection model"""
+        print("🚀 Starting model training...")
+        print(f"⚙️ Configuration: {TRAINING_CONFIG}")
         
-    def grab_screen(self):
-        screenshot = pyautogui.screenshot(region=self.region)
-        return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+        try:
+            # Check if dataset exists
+            if not os.path.exists(DATASET_YAML):
+                raise FileNotFoundError(f"Dataset config not found at {DATASET_YAML}")
+            
+            # Start timer
+            start_time = time.time()
+            
+            # Load model and train
+            model = YOLO(TRAINING_CONFIG["model"])
+            results = model.train(
+                data=DATASET_YAML,
+                epochs=TRAINING_CONFIG["epochs"],
+                imgsz=TRAINING_CONFIG["imgsz"],
+                batch=TRAINING_CONFIG["batch"],
+                patience=TRAINING_CONFIG["patience"],
+                name=TRAINING_CONFIG["name"],
+                exist_ok=TRAINING_CONFIG["exist_ok"]
+            )
+            
+            # Save the best model
+            model.save(MODEL_PATH)
+            training_time = (time.time() - start_time) / 60
+            print(f"✅ Training completed in {training_time:.1f} minutes")
+            print(f"💾 Model saved to {MODEL_PATH}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Training failed: {str(e)}")
+            return False
 
 # ==================== POKER DETECTOR ====================
 class PokerDetector:
     def __init__(self):
+        self.model = None
+        self.capture = None
+        self.ocr = None
+        self.game_state = "PREFLOP"
+        self.community_cards = []
+        self._initialize()
+
+    def _initialize(self):
+        """Initialize detector components"""
         try:
+            # Initialize OCR if enabled
+            if USE_OCR:
+                print("🔍 Initializing OCR engine...")
+                self.ocr = PokerOCR()
+            
+            # Initialize screen capture
+            self.capture = PokerScreenCapture(SCREEN_REGION)
+            
+            # Load or train model
             if os.path.exists(MODEL_PATH):
+                print(f"💾 Loading existing model from {MODEL_PATH}")
                 self.model = YOLO(MODEL_PATH)
             else:
-                print("⚠️  Model not found. Please train the model first.")
-                print("   Run: python train_poker_model.py")
-                self.model = None  # Set to None instead of returning
-                return
-            self.capture = PokerScreenCapture(SCREEN_REGION)
-            self.ocr = PokerOCR()
-            self.game_state = "PREFLOP"
-            self.community_cards = []
+                print("⏳ No trained model found - starting training...")
+                if PokerModelTrainer.train_model():
+                    self.model = YOLO(MODEL_PATH)
+                else:
+                    raise RuntimeError("Model training failed")
+                    
+            print("🎮 Poker detector ready!")
+            
         except Exception as e:
-            print(f"❌ Error initializing detector: {e}")
+            print(f"❌ Initialization failed: {str(e)}")
             self.model = None
+
+    # ... [rest of your existing PokerDetector methods] ...
+
+
 
     def _train_model(self):
         """Train YOLOv8 model if no pretrained exists"""
@@ -242,6 +215,19 @@ class PokerDetector:
         cv2.destroyAllWindows()
 
 # ==================== MAIN EXECUTION ====================
+# ==================== MAIN EXECUTION ====================
 if __name__ == "__main__":
+    print("""
+    ██████╗  ██████╗ ██╗  ██╗███████╗██████╗     ██████╗ ███████╗████████╗██████╗ 
+    ██╔══██╗██╔═══██╗██║ ██╔╝██╔════╝██╔══██╗    ██╔══██╗██╔════╝╚══██╔══╝██╔══██╗
+    ██████╔╝██║   ██║█████╔╝ █████╗  ██████╔╝    ██║  ██║█████╗     ██║   ██████╔╝
+    ██╔═══╝ ██║   ██║██╔═██╗ ██╔══╝  ██╔══██╗    ██║  ██║██╔══╝     ██║   ██╔══██╗
+    ██║     ╚██████╔╝██║  ██╗███████╗██║  ██║    ██████╔╝███████╗   ██║   ██║  ██║
+    ╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝
+    """)
+    
     detector = PokerDetector()
-    detector.run()
+    if detector.model is not None:
+        detector.run()
+    else:
+        print("❌ Failed to initialize poker detector")
