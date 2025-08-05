@@ -9,14 +9,14 @@ import time
 
 # ==================== CONFIGURATION ====================
 MODEL_PATH = "poker_model.pt"          # Path to save/load trained model
-DATASET_YAML = "dataset.yaml"          # Path to dataset configuration
+DATASET_YAML = "data.yaml"          # Path to dataset configuration
 SCREEN_REGION = (100, 100, 1000, 700)  # (x,y,width,height) of poker window
 CONFIDENCE_THRESHOLD = 0.5             # Detection confidence threshold
 USE_OCR = True                         # Enable/disable OCR processing
 
 # Training configuration
 TRAINING_CONFIG = {
-    "model": "yolov8n.pt",    # Base model (yolov8n.pt, yolov8s.pt, etc.)
+    "model": "yolov8m.pt",    # Base model (yolov8n.pt, yolov8s.pt, etc.)
     "epochs": 100,            # Number of training epochs
     "imgsz": 640,             # Image size
     "batch": 8,               # Batch size
@@ -231,3 +231,73 @@ if __name__ == "__main__":
         detector.run()
     else:
         print("❌ Failed to initialize poker detector")
+
+class PokerOCR:
+    def __init__(self):
+        self.reader = easyocr.Reader(['en']) if USE_OCR else None
+        self.card_pattern = re.compile(r'^([AKQJT2-9]|10)[shdc♠♥♦♣]$', re.IGNORECASE)
+        self.numeric_pattern = re.compile(r'[\d,.]+[kKmMbB]?')
+
+    def process_detection(self, class_name, region):
+        """Process detected region based on its class"""
+        if not USE_OCR:
+            return None
+
+        try:
+            # Card detection (hole cards and community cards)
+            if class_name.startswith(('card_', 'flop_', 'turn_', 'river_')):
+                return self._extract_card_value(region)
+            
+            # Numeric value detection
+            elif class_name in ('my_bet', 'villian_bet', 'my_stack', 'villian_stack', 'increaser'):
+                return self._extract_numeric_value(region)
+            
+            # Pot value detection
+            elif class_name == 'total_pot':
+                return self._extract_pot_value(region)
+
+        except Exception as e:
+            print(f"OCR Error for {class_name}: {str(e)}")
+        return None
+
+    def _extract_card_value(self, region):
+        """Extract poker card value (Ah, Ks, etc.)"""
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        result = self.reader.readtext(binary, allowlist='AKQJT2345678910shdc♠♥♦♣', detail=0)
+        if result:
+            text = ''.join(result).upper()
+            text = text.replace('10', 'T').replace('♠', 's').replace('♥', 'h').replace('♦', 'd').replace('♣', 'c')
+            if self.card_pattern.match(text):
+                return text
+        return None
+
+    def _extract_numeric_value(self, region):
+        """Extract numeric values like bets and stacks"""
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(gray)
+        result = self.reader.readtext(enhanced, allowlist='0123456789.,kKmMbB$', detail=0)
+        if result:
+            text = ''.join(result).upper()
+            match = self.numeric_pattern.search(text)
+            return match.group() if match else None
+        return None
+
+    def _extract_pot_value(self, region):
+        """Special handling for pot values"""
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        result = self.reader.readtext(gray, allowlist='0123456789.,kKmMbB$pPoOtT', detail=0)
+        if result:
+            text = ''.join(result).upper()
+            match = self.pot_pattern.search(text)
+            return match.group(1) if match else None
+        return None
+
+class PokerScreenCapture:
+    def __init__(self, region):
+        self.region = region
+        
+    def grab_screen(self):
+        screenshot = pyautogui.screenshot(region=self.region)
+        return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
