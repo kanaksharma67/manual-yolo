@@ -7,35 +7,31 @@ import re
 import os
 import time
 from collections import Counter
+import yaml
 
 # ==================== CONFIGURATION ====================
 MODEL_PATH = "poker_model.pt"
-DATASET_YAML = "roadmap1.v2i.yolov8/data.yaml"  
+DATASET_YAML = "roadmap1.v3i.yolov8/data.yaml"  
 SCREEN_REGION = (100, 100, 1000, 700)
 CONFIDENCE_THRESHOLD = 0.5
 USE_OCR = True
 
 # Enhanced Training Configuration
 TRAINING_CONFIG = {
-    "model": "yolov8x.pt",
+    "model": "yolov8m.pt",
     "epochs": 100,
     "imgsz": 640,
     "batch": 8,
     "patience": 15,
     "name": "poker_train",
     "exist_ok": True,
-    # Architecture
-    "depth_multiple": 1.2,
-    "width_multiple": 1.4,
     "dropout": 0.2,
-    # Optimization
     "lr0": 0.01,
     "lrf": 0.001,
     "momentum": 0.98,
     "weight_decay": 0.0001,
     "warmup_epochs": 5,
     "optimizer": "AdamW",
-    # Augmentation
     "hsv_h": 0.015,
     "hsv_s": 0.7,
     "hsv_v": 0.4,
@@ -242,8 +238,7 @@ class PokerModelTrainer:
                 name=TRAINING_CONFIG["name"],
                 exist_ok=TRAINING_CONFIG["exist_ok"],
                 # Architecture
-                depth_multiple=TRAINING_CONFIG["depth_multiple"],
-                width_multiple=TRAINING_CONFIG["width_multiple"],
+                
                 dropout=TRAINING_CONFIG["dropout"],
                 # Optimization
                 lr0=TRAINING_CONFIG["lr0"],
