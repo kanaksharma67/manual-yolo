@@ -8,6 +8,8 @@ import os
 import time
 from collections import Counter
 import yaml
+import json
+
 
 # ==================== CONFIGURATION ====================
 MODEL_PATH = "poker_model.pt"
@@ -199,14 +201,8 @@ class PokerOCR:
                 return text
         return None
 
-# ==================== SCREEN CAPTURE ====================
-class PokerScreenCapture:
-    def __init__(self, region):
-        self.region = region
-        
-    def grab_screen(self):
-        screenshot = pyautogui.screenshot(region=self.region)
-        return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+# ==================== SCREENSHOT CAPTURE ====================
+
 
 # ==================== ENHANCED MODEL TRAINER ====================
 class PokerModelTrainer:
@@ -309,135 +305,110 @@ class PokerModelTrainer:
             print("Recommend at least 50 samples per class for good accuracy")
 
 # ==================== POKER DETECTOR ====================
+
+
 class PokerDetector:
-    def __init__(self):
-        self.model = None
-        self.capture = None
-        self.ocr = None
-        self.game_state = "PREFLOP"
-        self.community_cards = []
-        self._initialize()
+    def __init__(self, model_path, classes, confidence_threshold, ocr_engine):
+        self.model = YOLO(model_path)
+        self.classes = classes
+        self.conf_threshold = confidence_threshold
+        self.ocr = ocr_engine
 
-    def _initialize(self):
-        """Initialize with enhanced checks"""
-        try:
-            # Initialize OCR
-            if USE_OCR:
-                self.ocr = PokerOCR()
-            
-            # Initialize capture
-            self.capture = PokerScreenCapture(SCREEN_REGION)
-            
-            # Load or train model
-            if os.path.exists(MODEL_PATH):
-                print(f"💾 Loading model from {MODEL_PATH}")
-                self.model = YOLO(MODEL_PATH)
-                
-                # Verify model
-                if not hasattr(self.model, 'names'):
-                    raise RuntimeError("Invalid model format")
-            else:
-                print("⏳ No model found - starting training...")
-                if PokerModelTrainer.train_model():
-                    self.model = YOLO(MODEL_PATH)
-                else:
-                    raise RuntimeError("Training failed")
-                    
-            print("🎮 Poker detector ready!")
-            
-        except Exception as e:
-            print(f"❌ Initialization failed: {str(e)}")
-            self.model = None
+    def process_screenshot(self, image_path, output_json, output_image):
+        frame = cv2.imread(image_path)
+        results = self.model(frame, conf=self.conf_threshold)
 
-    def _update_game_state(self, detections):
-        """Enhanced game state tracking"""
-        new_cards = []
-        for det in detections:
-            if det['class'].startswith(('flop_', 'turn_', 'river_')):
-                if det['text'] and self._validate_card(det['text']):
-                    new_cards.append(det['text'])
-        
-        if len(new_cards) != len(self.community_cards):
-            self.community_cards = new_cards
-            if len(new_cards) == 0:
-                self.game_state = "PREFLOP"
-            elif len(new_cards) == 3:
-                self.game_state = "FLOP"
-            elif len(new_cards) == 4:
-                self.game_state = "TURN"
-            elif len(new_cards) == 5:
-                self.game_state = "RIVER"
+        card_ranks = {}
+        card_suits = {}
+        community_cards = {}
+        buttons = []
 
-    def _validate_card(self, card_text):
-        """Strict card validation"""
-        if not card_text or len(card_text) < 2:
-            return False
-        rank, suit = card_text[:-1], card_text[-1]
-        return (rank in "AKQJT98765432") and (suit in "shdc")
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            class_id = int(box.cls)
+            class_name = self.classes[class_id]
+            confidence = float(box.conf)
+            region = frame[y1:y2, x1:x2]
 
-    def run(self):
-        """Enhanced detection loop"""
-        if self.model is None:
-            print("❌ Cannot run: Model not loaded")
-            return
-        
-        cv2.namedWindow("Poker Detection", cv2.WINDOW_NORMAL)
-        
-        while True:
-            frame = self.capture.grab_screen()
-            results = self.model(frame, conf=CONFIDENCE_THRESHOLD)
-            detected_frame = results[0].plot()
-            detections = []
+            ocr_text = None
+            if class_name in [
+                'card1_rank', 'card2_rank', 'flop1_rank', 'flop2_rank', 'flop3_rank',
+                'turn_rank', 'river_rank', 'total_pot', 'my_bet', 'my_stack',
+                'villian1_bet', 'villian2_bet', 'villian3_bet', 'villian4_bet', 'villian5_bet',
+                'villian1_name', 'villian2_name', 'villian3_name', 'villian4_name', 'villian5_name',
+                'villian1_stack', 'villian2_stack', 'villian3_stack', 'villian4_stack', 'villian5_stack',
+                'game_id'
+            ]:
+                ocr_text = self.ocr.process_detection(class_name, region)
 
-            # Process detections with enhanced OCR
-            for box in results[0].boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                class_id = int(box.cls)
-                class_name = CLASSES[class_id]
-                confidence = float(box.conf)
-                region = frame[y1:y2, x1:x2]
+            # Store ranks and suits separately
+            if "_rank" in class_name and ocr_text:
+                card_ranks[class_name] = ocr_text
+            elif "_suite_" in class_name:
+                suit = class_name.split("_suite_")[-1][0]
+                card_suits[class_name.replace("_suite_", "_rank")] = suit
 
-                ocr_text = self.ocr.process_detection(class_name, region) if self.ocr else None
-                
-                # Apply poker-specific validation
-                if class_name.startswith(('card_', 'flop_', 'turn_', 'river_')) and ocr_text:
-                    if not self._validate_card(ocr_text):
-                        ocr_text = None
-                
-                detections.append({
-                    'class': class_name,
-                    'confidence': confidence,
-                    'bbox': (x1, y1, x2, y2),
-                    'text': ocr_text
-                })
+            # Community cards
+            if class_name.startswith(('flop', 'turn', 'river')):
+                if "_rank" in class_name and ocr_text:
+                    community_cards[class_name] = ocr_text + card_suits.get(class_name, '')
 
-                # Display with enhanced formatting
-                if ocr_text:
-                    color = (0, 255, 0)  # Green for valid
-                    if class_name.startswith(('card_', 'flop_', 'turn_', 'river_')):
-                        color = (255, 0, 255)  # Purple for cards
-                    
-                    display_text = f"{class_name.split('_')[-1]}: {ocr_text} ({confidence:.0%})"
-                    cv2.putText(detected_frame, display_text, (x1, y1-10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # Buttons
+            if class_name.startswith("button_"):
+                cx, cy = (x1+x2)//2, (y1+y2)//2
+                buttons.append({"button": class_name, "center": [cx, cy]})
 
-            # Update game state
-            self._update_game_state(detections)
+            # Draw annotations
+            label = f"{class_name}:{ocr_text if ocr_text else ''}"
+            cv2.putText(frame, label, (x1, y1-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255,0,0), 2)
 
-            # Enhanced display
-            cv2.putText(detected_frame, f"Game State: {self.game_state}", (20, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+        # Merge hole cards
+        card1 = card_ranks.get("card1_rank", "") + card_suits.get("card1_rank", "")
+        card2 = card_ranks.get("card2_rank", "") + card_suits.get("card2_rank", "")
 
-            if self.community_cards:
-                cards_text = " ".join(self.community_cards)
-                cv2.putText(detected_frame, f"Community: {cards_text}", (20, 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+        # Determine game state
+        comm_count = len([c for c in community_cards.values() if c])
+        if comm_count == 0:
+            game_state = "PREFLOP"
+        elif comm_count == 3:
+            game_state = "FLOP"
+        elif comm_count == 4:
+            game_state = "TURN"
+        else:
+            game_state = "RIVER"
 
-            cv2.imshow("Poker Detection", detected_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        # Build final JSON
+        result = {
+            "game_id": card_ranks.get("game_id", ""),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "my_stack": card_ranks.get("my_stack", ""),
+            "card1": card1,
+            "card2": card2,
+            "my_bet": card_ranks.get("my_bet", ""),
+            "villains": [],
+            "buttons": buttons,
+            "community_cards": list(community_cards.values()),
+            "game_state": game_state
+        }
 
-        cv2.destroyAllWindows()
+        # Villains 1–5
+        for i in range(1, 6):
+            villain = {
+                "name": card_ranks.get(f"villian{i}_name", ""),
+                "stack": card_ranks.get(f"villian{i}_stack", ""),
+                "bet": card_ranks.get(f"villian{i}_bet", "")
+            }
+            result["villains"].append(villain)
+
+        # Save outputs
+        with open(output_json, "w") as f:
+            json.dump(result, f, indent=4)
+
+        cv2.imwrite(output_image, frame)
+        print(f"✅ JSON saved to {output_json}")
+        print(f"✅ Annotated screenshot saved to {output_image}")
 
 # ==================== MAIN EXECUTION ====================
 if __name__ == "__main__":
@@ -450,8 +421,27 @@ if __name__ == "__main__":
     ╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝
     """)
     
-    detector = PokerDetector()
-    if detector.model is not None:
-        detector.run()
-    else:
-        print("❌ Failed to initialize poker detector")
+    CLASSES = {i: name for i, name in enumerate([
+    'button_allin', 'button_bet', 'button_call', 'button_check', 'button_fold',
+    'button_raise', 'card1_rank', 'card1_suite_club', 'card1_suite_diamond',
+    'card1_suite_heart', 'card1_suite_spades', 'card2_rank', 'card2_suite_club',
+    'card2_suite_diamond', 'card2_suite_heart', 'card2_suite_spades',
+    'flop1_rank', 'flop1_suite_club', 'flop1_suite_diamond', 'flop1_suite_heart',
+    'flop1_suite_spades', 'flop2_rank', 'flop2_suite_club', 'flop2_suite_diamond',
+    'flop2_suite_heart', 'flop2_suite_spades', 'flop3_rank', 'flop3_suite_club',
+    'flop3_suite_diamond', 'flop3_suite_heart', 'flop3_suite_spades', 'game_id',
+    'iinput_field', 'my_bet', 'my_stack', 'position_BB', 'position_SB',
+    'river_rank', 'river_suite_club', 'river_suite_diamond', 'river_suite_heart',
+    'river_suite_spades', 'total_pot', 'turn_rank', 'turn_suite_club',
+    'turn_suite_diamond', 'turn_suite_heart', 'turn_suite_spades',
+    'villian1_bet', 'villian1_name', 'villian1_stack', 'villian2_bet',
+    'villian2_name', 'villian2_stack', 'villian3_bet', 'villian3_name',
+    'villian3_stack', 'villian4_bet', 'villian4_name', 'villian4_stack',
+    'villian5_bet', 'villian5_name', 'villian5_stack', 'winner'
+    ])}
+    detector = PokerDetector("poker_model.pt", CLASSES, 0.5, ocr_engine=PokerOCR())
+    detector.process_screenshot(
+        image_path="test_screenshot.png",
+        output_json="poker_result.json",
+        output_image="poker_labeled.png"
+    )
