@@ -1,0 +1,45 @@
+{
+    "game_info": {
+        "game_id": "",
+        "time": "2025-08-11 17:59:11",
+        "game_state": "PREFLOP"
+    },
+    "my_cards": {
+        "card1": "",
+        "card2": ""
+    },
+    "my_info": {
+        "stack": "",
+        "bet": ""
+    },
+    "villains": [
+        {
+            "name": "",
+            "stack": "",
+            "bet": ""
+        },
+        {
+            "name": "",
+            "stack": "",
+            "bet": ""
+        },
+        {
+            "name": "",
+            "stack": "",
+            "bet": ""
+        },
+        {
+            "name": "",
+            "stack": "",
+            "bet": ""
+        },
+        {
+            "name": "",
+            "stack": "",
+            "bet": ""
+        }
+    ],
+    "community_cards": [],
+    "buttons": [],
+    "pot": ""
+}
