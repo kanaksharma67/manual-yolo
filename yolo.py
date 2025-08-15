@@ -15,24 +15,13 @@ from PIL import Image
 
 import pyautogui
 from ultralytics import YOLO
+import re
+import os
+import time
+from collections import Counter
+import yaml
+import json
 
-# Optional: for pytesseract fallback
-try:
-    import pytesseract  # noqa: F401
-    TESSERACT_AVAILABLE = True
-except Exception:
-    TESSERACT_AVAILABLE = False
-
-# OpenAI integration - Make sure to set OPENAI_API_KEY in environment
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-except Exception:
-    OPENAI_AVAILABLE = False
-
-from dotenv import load_dotenv
-# Load environment variables from .env file
-load_dotenv()
 
 # ==================== CONFIGURATION ====================
 
@@ -325,6 +314,8 @@ class PokerOCR:
                 return text
         return None
 
+# ==================== SCREENSHOT CAPTURE ====================
+
 
 # ==================== HELPERS ====================
 
@@ -355,311 +346,111 @@ def write_json_atomic(path: str, data: dict):
             pass
 
 
-# ==================== DETECTOR (fixed __init__) ====================
+# ==================== POKER DETECTOR ====================
+
+
 class PokerDetector:
-    def __init__(self, model_path, classes, confidence_threshold, ocr_engine: PokerOCR = None):  # Fixed: _init_ -> __init__
-        try:
-            self.model = YOLO(model_path)
-        except Exception as e:
-            print(f"⚠ Warning: Could not load model {model_path}: {e}")
-            self.model = None
+    def __init__(self, model_path, classes, confidence_threshold, ocr_engine):
+        self.model = YOLO(model_path)
         self.classes = classes
         self.conf_threshold = confidence_threshold
-        self.ocr = ocr_engine or PokerOCR()
-        self.card_keys = [
-            "card1_rank", "card1_suit", "card2_rank", "card2_suit",
-            "flop1_rank", "flop1_suit", "flop2_rank", "flop2_suit",
-            "flop3_rank", "flop3_suit", "turn_rank", "turn_suit",
-            "river_rank", "river_suit",
-        ]
+        self.ocr = ocr_engine
 
-    # small helper: crop with pad and bounds-check
-    @staticmethod
-    def _safe_crop(frame, x1, y1, x2, y2, pad=2):
-        h, w = frame.shape[:2]
-        x1c = max(0, int(x1) - pad)
-        y1c = max(0, int(y1) - pad)
-        x2c = min(w, int(x2) + pad)
-        y2c = min(h, int(y2) + pad)
-        if x2c <= x1c or y2c <= y1c:
-            return None
-        return frame[y1c:y2c, x1c:x2c]
+    def process_screenshot(self, image_path, output_json, output_image):
+        frame = cv2.imread(image_path)
+        results = self.model(frame, conf=self.conf_threshold)
 
-    def run_ocr_on_bbox(self, bbox_img):
-        if self.ocr is None or self.ocr.reader is None:
-            return ""
-        gray = cv2.cvtColor(bbox_img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-        try:
-            text = self.ocr.reader.readtext(thresh, detail=0)
-        except Exception:
-            text = []
-        return clean_rank(text[0]) if text else ""
+        card_ranks = {}
+        card_suits = {}
+        community_cards = {}
+        buttons = []
 
-    def _iter_detections(self, results):
-        if results is None:
-            return
-        try:
-            res = results[0]
-        except Exception:
-            res = results
-        boxes = getattr(res, "boxes", None)
-        if boxes is None:
-            return
-        try:
-            n = len(boxes)
-        except Exception:
-            n = 0
-        for i in range(n):
-            b = boxes[i]
-            try:
-                xyxy = b.xyxy[0].tolist()
-                x1, y1, x2, y2 = map(int, xyxy)
-            except Exception:
-                try:
-                    x1, y1, x2, y2 = map(int, b.xyxy.view(-1).tolist()[:4])
-                except Exception:
-                    continue
-            try:
-                c = b.conf
-                conf = float(c[0].item() if hasattr(c, "len") else c.item())
-            except Exception:
-                try:
-                    conf = float(b.conf)
-                except Exception:
-                    conf = None
-            try:
-                cls_t = b.cls
-                class_id = int(cls_t[0].item() if hasattr(cls_t, "len") else cls_t.item())
-            except Exception:
-                try:
-                    class_id = int(float(b.cls))
-                except Exception:
-                    class_id = -1
-            yield {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "class_id": class_id, "conf": conf}
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            class_id = int(box.cls)
+            class_name = self.classes[class_id]
+            confidence = float(box.conf)
+            region = frame[y1:y2, x1:x2]
 
-    def process_frame(self, frame):
-        """
-        Enhanced frame processing with individual card cropping and collage analysis.
-        """
-        if self.model is None:
-            print("⚠ Model not loaded, skipping detection stage.")
-            return {}, [], frame, {"boxes": 0, "non_empty_fields": 0}
-
-        try:
-            results = self.model.predict(source=frame, conf=self.conf_threshold, verbose=False)
-        except Exception:
-            results = self.model(frame, conf=self.conf_threshold)
-
-        new_detected_values = {}
-        for k, v in YOLO_TO_JSON_MAP.items():
-            key, _ = v
-            if key != "buttons":
-                new_detected_values.setdefault(key, "")
-        for fld in [
-            "game_id", "my_bet", "my_stack", "total_pot",
-            "villian1_name", "villian1_stack", "villian1_bet",
-            "villian2_name", "villian2_stack", "villian2_bet",
-            "villian3_name", "villian3_stack", "villian3_bet",
-            "villian4_name", "villian4_stack", "villian4_bet",
-            "villian5_name", "villian5_stack", "villian5_bet",
-        ]:
-            new_detected_values.setdefault(fld, "")
-        new_detected_values["buttons"] = []
-
-        raw_detections = []
-        box_count = 0
-
-        # collect crops for collage/GPT fallback
-        crops_for_fallback = []  # list of (class_name, bbox, crop_img)
-
-        for i, det in enumerate(self._iter_detections(results)):
-            box_count += 1
-            x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
-            class_id = det["class_id"]
-            conf = det["conf"]
-            class_name = self.classes.get(class_id, f"class{class_id}")
-
-            y1c, y2c = max(0, y1), max(0, y2)
-            x1c, x2c = max(0, x1), max(0, x2)
-            region = frame[y1c:y2c, x1c:x2c]
-
-            if DEBUG:
-                os.makedirs("debug_crops", exist_ok=True)
-                cv2.imwrite(f"debug_crops/{i}_{class_name}.png", region if region is not None else np.zeros((2,2,3), np.uint8))
-
-            mapped_to = None
-            mapped_value = None
             ocr_text = None
+            if class_name in [
+                'card1_rank', 'card2_rank', 'flop1_rank', 'flop2_rank', 'flop3_rank',
+                'turn_rank', 'river_rank', 'total_pot', 'my_bet', 'my_stack',
+                'villian1_bet', 'villian2_bet', 'villian3_bet', 'villian4_bet', 'villian5_bet',
+                'villian1_name', 'villian2_name', 'villian3_name', 'villian4_name', 'villian5_name',
+                'villian1_stack', 'villian2_stack', 'villian3_stack', 'villian4_stack', 'villian5_stack',
+                'game_id'
+            ]:
+                ocr_text = self.ocr.process_detection(class_name, region)
 
-            if class_name in YOLO_TO_JSON_MAP:
-                key, val = YOLO_TO_JSON_MAP[class_name]
-                mapped_to = key
-                if key == "buttons":
-                    new_detected_values["buttons"].append(val)
-                    mapped_value = val
-                elif val is not None:
-                    new_detected_values[key] = val
-                    mapped_value = val
-                else:
-                    # run OCR locally on bbox
-                    rank_val = None
-                    if region is not None and region.size != 0:
-                        rank_val = self.run_ocr_on_bbox(region)
-                    new_detected_values[key] = rank_val or ""
-                    mapped_value = rank_val
-                    ocr_text = rank_val
-            else:
-                # If YOLO did not map to known key, let OCR engine try to extract.
-                ocr_text = self.ocr.process_detection(class_name, region) if self.ocr else None
-                if ocr_text:
-                    new_detected_values[class_name] = ocr_text
-                if "suite" in class_name.lower() or "suit" in class_name.lower():
-                    suit_word = class_name.split("_")[-1].lower()
-                    suit_map = {"club": "c", "diamond": "d", "heart": "h", "spade": "s", "spades": "s"}
-                    for tgt_prefix in ["card1", "card2", "flop1", "flop2", "flop3", "turn", "river"]:
-                        if class_name.startswith(tgt_prefix):
-                            new_detected_values[f"{tgt_prefix}_suit"] = suit_map.get(suit_word, "?")
-                            mapped_to = f"{tgt_prefix}_suit"
-                            mapped_value = new_detected_values[f"{tgt_prefix}_suit"]
-                            break
+            # Store ranks and suits separately
+            if "_rank" in class_name and ocr_text:
+                card_ranks[class_name] = ocr_text
+            elif "_suite_" in class_name:
+                suit = class_name.split("_suite_")[-1][0]
+                card_suits[class_name.replace("_suite_", "_rank")] = suit
 
-            # Keep crops for LLM fallback if the channel is likely important
-            if any(k in class_name.lower() for k in ("name", "stack", "bet", "rank", "suite", "suit")):
-                crop_img = self._safe_crop(frame, x1, y1, x2, y2)
-                if crop_img is not None:
-                    crops_for_fallback.append((class_name, (x1, y1, x2, y2), crop_img))
+            # Community cards
+            if class_name.startswith(('flop', 'turn', 'river')):
+                if "_rank" in class_name and ocr_text:
+                    community_cards[class_name] = ocr_text + card_suits.get(class_name, '')
 
-            # Annotate
-            label_bits = [class_name]
-            if ocr_text:
-                label_bits.append(str(ocr_text))
-            if mapped_to and mapped_value and mapped_to != "buttons":
-                label_bits.append(f"{mapped_to}:{mapped_value}")
-            label = " ".join(label_bits)
-            cv2.putText(frame, label, (x1, max(0, y1 - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 1)
+            # Buttons
+            if class_name.startswith("button_"):
+                cx, cy = (x1+x2)//2, (y1+y2)//2
+                buttons.append({"button": class_name, "center": [cx, cy]})
 
-            raw_detections.append({
-                "class_id": class_id,
-                "class_name": class_name,
-                "confidence": conf,
-                "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                "ocr_text": ocr_text,
-                "mapped_to": mapped_to,
-                "mapped_value": mapped_value,
-            })
+            # Draw annotations
+            label = f"{class_name}:{ocr_text if ocr_text else ''}"
+            cv2.putText(frame, label, (x1, y1-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255,0,0), 2)
 
-        non_empty_fields = sum(
-            1 for k, v in new_detected_values.items()
-            if k != "buttons" and isinstance(v, str) and v.strip()
-        )
-        stats = {"boxes": box_count, "non_empty_fields": non_empty_fields}
+        # Merge hole cards
+        card1 = card_ranks.get("card1_rank", "") + card_suits.get("card1_rank", "")
+        card2 = card_ranks.get("card2_rank", "") + card_suits.get("card2_rank", "")
 
-        # If important keys are empty and we have crops, create collage and call GPT-4o
-        missing_keys = [k for k in LLM_IMPORTANT_KEYS if not new_detected_values.get(k)]
-        if USE_GPT_FALLBACK and crops_for_fallback and missing_keys:
-            try:
-                collage_path = self._build_collage(crops_for_fallback)
-                # Call GPT-4o for better accuracy
-                llm_results = query_gpt4o_for_crops(collage_path, missing_keys)
-                if isinstance(llm_results, dict):
-                    for k, v in llm_results.items():
-                        if v and not new_detected_values.get(k):
-                            new_detected_values[k] = v
-                            print(f"✅ GPT-4o filled missing field: {k} = {v}")
-            except Exception as e:
-                print("⚠ GPT-4o fallback failed:", e)
+        # Determine game state
+        comm_count = len([c for c in community_cards.values() if c])
+        if comm_count == 0:
+            game_state = "PREFLOP"
+        elif comm_count == 3:
+            game_state = "FLOP"
+        elif comm_count == 4:
+            game_state = "TURN"
+        else:
+            game_state = "RIVER"
 
-        # After collecting detections, crop all regions
-        # Comment out this section temporarily:
-        # if CROP_INDIVIDUAL_CARDS or CREATE_DETECTION_COLLAGE:
-        #     individual_crops, community_crops, other_elements = self.crop_all_detected_regions(frame, raw_detections)
-            
-        #     # Analyze individual hole cards
-        #     if individual_crops:
-        #         gpt_card_results = self.analyze_individual_cards_with_gpt4o(individual_crops)
-                
-        #         # Update detected values with individual card results
-        #         for card_type, card_data in gpt_card_results.items():
-        #             if "hole_card_1" in card_type:
-        #                 new_detected_values["card1_rank"] = card_data["rank"]
-        #                 new_detected_values["card1_suit"] = card_data["suit"]
-        #             elif "hole_card_2" in card_type:
-        #                 new_detected_values["card2_rank"] = card_data["rank"]
-        #                 new_detected_values["card2_suit"] = card_data["suit"]
-            
-        #     # Analyze community cards and other elements with collage
-        #     if community_crops or other_elements:
-        #         collage_results = self.analyze_collage_with_gpt4o(community_crops, other_elements)
-                
-        #         # Update with collage results
-        #         if collage_results:
-        #             # Update community cards
-        #             if "community_cards" in collage_results:
-        #                 for card_name, card_data in collage_results["community_cards"].items():
-        #                     if "flop1" in card_name:
-        #                         new_detected_values["flop1_rank"] = card_data.get("rank", "")
-        #                         new_detected_values["flop1_suit"] = card_data.get("suit", "")
-        #                     elif "flop2" in card_name:
-        #                         new_detected_values["flop2_rank"] = card_data.get("rank", "")
-        #                         new_detected_values["flop2_suit"] = card_data.get("suit", "")
-        #                     elif "flop3" in card_name:
-        #                         new_detected_values["flop3_rank"] = card_data.get("rank", "")
-        #                         new_detected_values["flop3_suit"] = card_data.get("suit", "")
-        #                     elif "turn" in card_name:
-        #                         new_detected_values["turn_rank"] = card_data.get("rank", "")
-        #                         new_detected_values["turn_suit"] = card_data.get("suit", "")
-        #                     elif "river" in card_name:
-        #                         new_detected_values["river_rank"] = card_data.get("rank", "")
-        #                         new_detected_values["river_suit"] = card_data.get("suit", "")
-                    
-        #             # Update other information
-        #             if "player_info" in collage_results:
-        #                 for key, value in collage_results["player_info"].items():
-        #                     if key == "my_stack":
-        #                         new_detected_values["my_stack"] = value
-        #                     elif key == "my_bet":
-        #                         new_detected_values["my_bet"] = value
-        #                     elif key == "pot":
-        #                         new_detected_values["total_pot"] = value
-                    
-        #             if "buttons" in collage_results:
-        #                 new_detected_values["buttons"] = collage_results["buttons"]
+        # Build final JSON
+        result = {
+            "game_id": card_ranks.get("game_id", ""),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "my_stack": card_ranks.get("my_stack", ""),
+            "card1": card1,
+            "card2": card2,
+            "my_bet": card_ranks.get("my_bet", ""),
+            "villains": [],
+            "buttons": buttons,
+            "community_cards": list(community_cards.values()),
+            "game_state": game_state
+        }
 
-        return new_detected_values, raw_detections, frame, stats
+        # Villains 1–5
+        for i in range(1, 6):
+            villain = {
+                "name": card_ranks.get(f"villian{i}_name", ""),
+                "stack": card_ranks.get(f"villian{i}_stack", ""),
+                "bet": card_ranks.get(f"villian{i}_bet", "")
+            }
+            result["villains"].append(villain)
 
-    def _build_collage(self, crops: List[Tuple[str, Tuple[int,int,int,int], np.ndarray]], thumb_size=(160, 60)):
-        """
-        Create a tiled collage of crops and save to a temp file. Return path.
-        crops: list of (class_name, bbox, img)
-        """
-        images = []
-        labels = []
-        for class_name, bbox, img in crops:
-            try:
-                pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                pil.thumbnail(thumb_size)
-                images.append(pil)
-                labels.append(class_name)
-            except Exception:
-                continue
+        # Save outputs
+        with open(output_json, "w") as f:
+            json.dump(result, f, indent=4)
 
-        if not images:
-            raise ValueError("No valid crops to build collage.")
-
-        # compute grid
-        n = len(images)
-        cols = min(4, n)
-        rows = ceil(n / cols)
-        w_max = max(img.width for img in images)
-        h_max = max(img.height for img in images)
-
-        collage_w = cols * w_max
-        collage_h = rows * (h_max + 18)  # extra for label text
-        collage = Image.new("RGB", (collage_w, collage_h), (40, 40, 40))
+        cv2.imwrite(output_image, frame)
+        print(f"✅ JSON saved to {output_json}")
+        print(f"✅ Annotated screenshot saved to {output_image}")
 
         for idx, img in enumerate(images):
             r = idx // cols
@@ -961,11 +752,27 @@ if __name__ == "__main__":
     print(" Starting Poker OCR + Detector with GPT-4o integration")
     print("📁 Loading environment variables from .env file...")
     
-    # Check if .env file exists
-    if os.path.exists(".env"):
-        print("✅ .env file found")
-    else:
-        print("⚠ .env file not found. Create one with OPENAI_API_KEY=your_key_here")
-    
-    detector = PokerDetector(MODEL_PATH, CLASSES, CONFIDENCE_THRESHOLD, ocr_engine=PokerOCR())
-    detector.run_live(output_json="poker_result.json", output_image="poker_labeled.png")
+    CLASSES = {i: name for i, name in enumerate([
+    'button_allin', 'button_bet', 'button_call', 'button_check', 'button_fold',
+    'button_raise', 'card1_rank', 'card1_suite_club', 'card1_suite_diamond',
+    'card1_suite_heart', 'card1_suite_spades', 'card2_rank', 'card2_suite_club',
+    'card2_suite_diamond', 'card2_suite_heart', 'card2_suite_spades',
+    'flop1_rank', 'flop1_suite_club', 'flop1_suite_diamond', 'flop1_suite_heart',
+    'flop1_suite_spades', 'flop2_rank', 'flop2_suite_club', 'flop2_suite_diamond',
+    'flop2_suite_heart', 'flop2_suite_spades', 'flop3_rank', 'flop3_suite_club',
+    'flop3_suite_diamond', 'flop3_suite_heart', 'flop3_suite_spades', 'game_id',
+    'iinput_field', 'my_bet', 'my_stack', 'position_BB', 'position_SB',
+    'river_rank', 'river_suite_club', 'river_suite_diamond', 'river_suite_heart',
+    'river_suite_spades', 'total_pot', 'turn_rank', 'turn_suite_club',
+    'turn_suite_diamond', 'turn_suite_heart', 'turn_suite_spades',
+    'villian1_bet', 'villian1_name', 'villian1_stack', 'villian2_bet',
+    'villian2_name', 'villian2_stack', 'villian3_bet', 'villian3_name',
+    'villian3_stack', 'villian4_bet', 'villian4_name', 'villian4_stack',
+    'villian5_bet', 'villian5_name', 'villian5_stack', 'winner'
+    ])}
+    detector = PokerDetector("poker_model.pt", CLASSES, 0.5, ocr_engine=PokerOCR())
+    detector.process_screenshot(
+        image_path="test_screenshot.png",
+        output_json="poker_result.json",
+        output_image="poker_labeled.png"
+    )
