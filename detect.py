@@ -52,20 +52,22 @@ def classify_card_rank(crop):
     try:
         # Run rank classification on the cropped region
         rank_results = rank_model(crop)[0]
-        rank_detections = sv.Detections.from_ultralytics(rank_results)
         
-        if len(rank_detections.xyxy) > 0:
-            # Get the detection with highest confidence
-            best_idx = np.argmax(rank_detections.confidence)
-            best_class_id = rank_detections.class_id[best_idx]
-            best_confidence = rank_detections.confidence[best_idx]
+        # Classification models return .probs, not detections with bounding boxes
+        if hasattr(rank_results, 'probs') and rank_results.probs is not None:
+            # Get the top prediction
+            top_class_id = rank_results.probs.top1  # Index of highest confidence class
+            top_confidence = rank_results.probs.top1conf.item()  # Confidence score
             
             # Get rank name from model
-            rank_name = rank_model.names.get(best_class_id, "")
+            rank_name = rank_model.names.get(top_class_id, "")
             
             # Only return if confidence is high enough
-            if best_confidence > 0.5:  # Adjust threshold as needed
+            if top_confidence > 0.5:  # Adjust threshold as needed
+                print(f"[v0] Rank classified: {rank_name} (confidence: {top_confidence:.3f})")
                 return rank_name
+            else:
+                print(f"[v0] Low confidence rank: {rank_name} (confidence: {top_confidence:.3f})")
         
         return ""
     except Exception as e:
@@ -148,86 +150,45 @@ def extract_text_with_multiple_methods(crop, class_name):
     if class_name.lower() in RANK_CLASSES:
         return classify_card_rank(crop)
     
-    # Continue with existing OCR logic for non-rank classes
     best_text = ""
     best_confidence = 0
     
     # Determine enhancement type based on class name
-    is_card_rank = any(rank_keyword in class_name.lower() for rank_keyword in ['card1', 'card2', 'flop', 'turn', 'river'])
-    enhancement_type = "card_rank" if is_card_rank else "standard"
+    enhancement_type = "game_id" if "game_id" in class_name.lower() else "standard"
 
-    # Enhanced processing specifically for card ranks
-    if is_card_rank:
-        try:
-            # Method 1: Enhanced preprocessing with special handling for ranks
-            enhanced_crop = enhance_for_ocr(crop, "card_rank")
-            if enhanced_crop is not None:
-                ocr_results = ocr_reader.readtext(enhanced_crop, detail=1, paragraph=False)
-                for bbox, text, conf in ocr_results:
-                    text = text.strip().upper()
-                    if conf > best_confidence:
-                        best_text = text
-                        best_confidence = conf
-            
-            # Method 2: Alternative thresholding and denoising
-            if best_confidence < 0.8:
-                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop.copy()
-                _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                ocr_results = ocr_reader.readtext(thresh, detail=1, paragraph=False)
-                for bbox, text, conf in ocr_results:
-                    text = text.strip().upper()
-                    if conf > best_confidence:
-                        best_text = text
-                        best_confidence = conf
-            
-            # Method 3: Try different scaling
-            if best_confidence < 0.7:
-                resized = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                ocr_results = ocr_reader.readtext(resized, detail=1, paragraph=False)
-                for bbox, text, conf in ocr_results:
-                    text = text.strip().upper()
-                    if conf > best_confidence:
-                        best_text = text
-                        best_confidence = conf
-            
-            # Clean and validate the detected text
-            if best_text:
-                # Correct common OCR errors
-                for wrong, correct in MAPPING_CORRECTION.items():
-                    best_text = best_text.replace(wrong, correct)
-                
-                # Match against valid ranks
-                best_text = best_text.strip().upper()
-                if len(best_text) > 2:  # Try to find rank within longer text
-                    for rank in sorted(VALID_CARD_RANKS, key=len, reverse=True):
-                        if rank in best_text:
-                            best_text = rank
-                            break
-                
-                # Final validation
-                if best_text in VALID_CARD_RANKS:
-                    return best_text
-                return best_text if best_confidence > 0.6 else ""
-            
-            return ""
-
-        except Exception as e:
-            print(f"Card rank OCR error: {e}")
-            return ""
-    else:
-        # Standard OCR processing for non-card elements
-        try:
-            enhanced_crop = enhance_for_ocr(crop, enhancement_type)
-            if enhanced_crop is not None:
-                ocr_results = ocr_reader.readtext(enhanced_crop, detail=1, paragraph=False)
-                for bbox, text, conf in ocr_results:
-                    if conf > best_confidence:
-                        best_text = text.strip()
-                        best_confidence = conf
-            return best_text if best_confidence > 0.4 else ""
-        except Exception as e:
-            print(f"Standard OCR error: {e}")
-            return ""
+    try:
+        enhanced_crop = enhance_for_ocr(crop, enhancement_type)
+        if enhanced_crop is not None:
+            ocr_results = ocr_reader.readtext(enhanced_crop, detail=1, paragraph=False)
+            for bbox, text, conf in ocr_results:
+                if conf > best_confidence:
+                    best_text = text.strip()
+                    best_confidence = conf
+        
+        if best_confidence < 0.7:
+            # Method 2: Different thresholding
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop.copy()
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            ocr_results = ocr_reader.readtext(thresh, detail=1, paragraph=False)
+            for bbox, text, conf in ocr_results:
+                if conf > best_confidence:
+                    best_text = text.strip()
+                    best_confidence = conf
+        
+        if best_confidence < 0.6:
+            # Method 3: Scaling
+            resized = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            ocr_results = ocr_reader.readtext(resized, detail=1, paragraph=False)
+            for bbox, text, conf in ocr_results:
+                if conf > best_confidence:
+                    best_text = text.strip()
+                    best_confidence = conf
+        
+        return best_text if best_confidence > 0.4 else ""
+        
+    except Exception as e:
+        print(f"OCR error for {class_name}: {e}")
+        return ""
 
 def create_clean_detections(xyxy, class_id=None, confidence=None, tracker_id=None):
     """Create a completely clean Detections object with guaranteed valid data types"""
