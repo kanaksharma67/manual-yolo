@@ -3,39 +3,37 @@ import shutil
 from ultralytics import YOLO
 
 # === 1️⃣ Paths ===
-# Path to your dataset (must follow YOLO classification folder format)
-dataset_path = "rank_classifier"  # contains train/ and valid/ subfolders
-
-# Base folder of your manual-yolo project
-project_base = r"C:\Users\HP\manual-yolo"
-
-# YOLO training output folder
+dataset_path = "rank_classifier"
+project_base = r"C:\Users\HP\monday\manual-yolo"
 project_runs = os.path.join(project_base, "runs")
-
-# Final classifier model path
+run_name = "rank_classifier"
+run_folder = os.path.join(project_runs, run_name)
 final_model_path = os.path.join(project_base, "rank_classifier.pt")
 
-# === 2️⃣ Load YOLOv8 classification model (pretrained on ImageNet) ===
-model = YOLO("yolov8n-cls.pt")  # "n" = nano, good for small datasets
+# === 🔄 Remove old run folder if exists ===
+if os.path.exists(run_folder):
+    shutil.rmtree(run_folder)
+    print(f"🗑️ Removed old run folder: {run_folder}")
+
+# === 2️⃣ Load YOLOv8 classification model ===
+model = YOLO("yolov8n-cls.pt")
 
 # === 3️⃣ Train ===
 model.train(
     data=dataset_path,
-    epochs=100,
+    epochs=50,
     imgsz=64,
     batch=64,
     workers=4,
     patience=10,
-    augment=True,
-    project=project_runs,         # Save inside manual-yolo\runs
-    name="rank_classifier"        # Run name
+    project=project_runs,
+    name=run_name
 )
 
-# === 4️⃣ Auto-copy best.pt to manual-yolo/rank_classifier.pt ===
-best_model_path = os.path.join(project_runs, "classify", "rank_classifier", "weights", "best.pt")
-
+# === 4️⃣ Copy best.pt to fixed location ===
+best_model_path = os.path.join(run_folder, "weights", "best.pt")
 if os.path.exists(best_model_path):
     shutil.copy(best_model_path, final_model_path)
     print(f"\n✅ Training complete! Best model copied to: {final_model_path}")
 else:
-    print("\n❌ ERROR: best.pt not found. Check training run folder.")
+    print(f"\n❌ ERROR: best.pt not found at {best_model_path}")

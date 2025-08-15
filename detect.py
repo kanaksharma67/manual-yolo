@@ -11,13 +11,15 @@ import supervision as sv
 
 # ================= CONFIG =================
 MODEL_PATH = "poker_model.pt"
+RANK_MODEL_PATH = "rank_classifier.pt"  # Added rank classifier model path
 OUTPUT_FOLDER = "live_output"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-SCREEN_REGION = {"top": 0, "left": 29, "width": 770, "height": 550}
+SCREEN_REGION = {"top": 48, "left": 970, "width": 930, "height": 1130}
 
-# Init YOLO + Tracker + OCR
-model = YOLO(MODEL_PATH)
+model = YOLO(MODEL_PATH)  # Main poker detection model
+rank_model = YOLO(RANK_MODEL_PATH)  # Rank classification model
+
 tracker = sv.ByteTrack()
 use_gpu_for_ocr = torch.cuda.is_available()
 ocr_reader = easyocr.Reader(['en'], gpu=use_gpu_for_ocr)
@@ -28,7 +30,9 @@ all_detections = []
 bbox_annotator = sv.BoxAnnotator()
 
 VALID_CARD_RANKS = {'A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'}
-MAPPING_CORRECTION = {'O': '0', 'I': '1', 'S': '5', 'Z': '2','12': '2'}
+MAPPING_CORRECTION = {'O': '0', 'I': '1', 'S': '5', 'Z': '2', 'B': '8'}
+
+RANK_CLASSES = {'card1_rank', 'card2_rank', 'flop1_rank', 'flop2_rank', 'flop3_rank', 'turn_rank', 'river_rank'}
 
 def safe_crop(frame, x1, y1, x2, y2):
     h, w = frame.shape[:2]
@@ -39,6 +43,34 @@ def safe_crop(frame, x1, y1, x2, y2):
     if x2 <= x1 or y2 <= y1:
         return None
     return frame[y1:y2, x1:x2]
+
+def classify_card_rank(crop):
+    """Use YOLO rank classifier to detect card rank"""
+    if crop is None or crop.size == 0:
+        return ""
+    
+    try:
+        # Run rank classification on the cropped region
+        rank_results = rank_model(crop)[0]
+        rank_detections = sv.Detections.from_ultralytics(rank_results)
+        
+        if len(rank_detections.xyxy) > 0:
+            # Get the detection with highest confidence
+            best_idx = np.argmax(rank_detections.confidence)
+            best_class_id = rank_detections.class_id[best_idx]
+            best_confidence = rank_detections.confidence[best_idx]
+            
+            # Get rank name from model
+            rank_name = rank_model.names.get(best_class_id, "")
+            
+            # Only return if confidence is high enough
+            if best_confidence > 0.5:  # Adjust threshold as needed
+                return rank_name
+        
+        return ""
+    except Exception as e:
+        print(f"Rank classification error: {e}")
+        return ""
 
 def enhance_for_ocr(image, enhancement_type="standard"):
     """Enhanced preprocessing for better OCR accuracy"""
@@ -113,6 +145,10 @@ def extract_text_with_multiple_methods(crop, class_name):
     if crop is None:
         return ""
     
+    if class_name.lower() in RANK_CLASSES:
+        return classify_card_rank(crop)
+    
+    # Continue with existing OCR logic for non-rank classes
     best_text = ""
     best_confidence = 0
     
@@ -134,7 +170,7 @@ def extract_text_with_multiple_methods(crop, class_name):
                         best_confidence = conf
             
             # Method 2: Alternative thresholding and denoising
-            if best_confidence < 0.85:  # Increased threshold
+            if best_confidence < 0.8:
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop.copy()
                 _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
                 ocr_results = ocr_reader.readtext(thresh, detail=1, paragraph=False)
@@ -145,7 +181,7 @@ def extract_text_with_multiple_methods(crop, class_name):
                         best_confidence = conf
             
             # Method 3: Try different scaling
-            if best_confidence < 0.75:  # Increased threshold
+            if best_confidence < 0.7:
                 resized = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
                 ocr_results = ocr_reader.readtext(resized, detail=1, paragraph=False)
                 for bbox, text, conf in ocr_results:
@@ -171,7 +207,7 @@ def extract_text_with_multiple_methods(crop, class_name):
                 # Final validation
                 if best_text in VALID_CARD_RANKS:
                     return best_text
-                return best_text if best_confidence > 0.65 else ""  # Increased threshold
+                return best_text if best_confidence > 0.6 else ""
             
             return ""
 
@@ -188,7 +224,7 @@ def extract_text_with_multiple_methods(crop, class_name):
                     if conf > best_confidence:
                         best_text = text.strip()
                         best_confidence = conf
-            return best_text if best_confidence > 0.5 else ""  # Increased threshold
+            return best_text if best_confidence > 0.4 else ""
         except Exception as e:
             print(f"Standard OCR error: {e}")
             return ""
