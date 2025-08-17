@@ -15,7 +15,7 @@ RANK_MODEL_PATH = "rank_classifier.pt"
 OUTPUT_FOLDER = "live_output"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-SCREEN_REGION = {"top": 0, "left": 0, "width": 1919, "height": 1199}
+SCREEN_REGION = {"top": 48, "left": 970, "width": 930, "height": 1130}
 
 model = YOLO(MODEL_PATH)
 rank_model = YOLO(RANK_MODEL_PATH)
